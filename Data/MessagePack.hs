@@ -13,12 +13,19 @@ pack types.
 The @Serialize@ instances define how Object values may be serialized and
 deserialized to message pack binary format, following the specification.
 -}
-module Data.MessagePack where
+module Data.MessagePack (
+    Object(..),
+    module Data.MessagePack.FixInt,
+
+    decode,
+    encode,
+    ) where
 
 import Control.Applicative
 import Control.Monad
 import Data.Bits
 import Data.Int
+import Data.MessagePack.FixInt
 import Data.MessagePack.Spec
 import Data.Serialize
 import Data.Text (Text)
@@ -28,6 +35,7 @@ import qualified Data.Map as M
 
 data Object = ObjectNil
             | ObjectInt    Int64
+            | ObjectFixInt FixInt
             | ObjectBool   Bool
             | ObjectFloat  Float
             | ObjectDouble Double
@@ -40,17 +48,20 @@ data Object = ObjectNil
 
 instance Serialize Object where
 
-    put (ObjectInt i)
-          | i >= 0   && i <= 127        = putWord8 $ fromIntegral i
-          | i >= -32 && i <= -1         = putWord8 $ fromIntegral i
-          | i >= 0   && i < 0x100       = putWord8 uint8  >> putWord8    (fromIntegral i)
-          | i >= 0   && i < 0x10000     = putWord8 uint16 >> putWord16be (fromIntegral i)
-          | i >= 0   && i < 0x100000000 = putWord8 uint32 >> putWord32be (fromIntegral i)
-          | i >= 0                      = putWord8 uint64 >> putWord64be (fromIntegral i)
-          | i >= -0x80                  = putWord8 int8   >> putWord8    (fromIntegral i)
-          | i >= -0x8000                = putWord8 int16  >> putWord16be (fromIntegral i)
-          | i >= -0x80000000            = putWord8 int32  >> putWord32be (fromIntegral i)
-          | otherwise                   = putWord8 int64  >> putWord64be (fromIntegral i)
+    put (ObjectFixInt fi) = case fi of
+        NegFixInt i | i >= -32 && i <= -1 -> putWord8 (fromIntegral i)
+        PosFixInt   i | i <= 127          -> putWord8 (i .&. 0x7F)
+        FixInt8  i    -> putWord8 int8  >> putWord8 (fromIntegral i)
+        FixInt16 i    -> putWord8 int16 >> putWord16be (fromIntegral i)
+        FixInt32 i    -> putWord8 int32 >> putWord32be (fromIntegral i)
+        FixInt64 i    -> putWord8 int64 >> putWord64be (fromIntegral i)
+        PosFixInt8  i -> putWord8 uint8  >> putWord8 i
+        PosFixInt16 i -> putWord8 uint16 >> putWord16be i
+        PosFixInt32 i -> putWord8 uint32 >> putWord32be i
+        PosFixInt64 i -> putWord8 uint64 >> putWord64be i
+        _             -> put . ObjectFixInt $ anyValidFixInt fi
+
+    put (ObjectInt i)      = put . ObjectFixInt $ fixIntValue i
 
     put ObjectNil          = putWord8 nil
 
@@ -129,16 +140,6 @@ instance Serialize Object where
           | k == float32                      = ObjectFloat  <$> getFloat32be
           | k == float64                      = ObjectDouble <$> getFloat64be
 
-          | k .&. posFixintMask == posFixint  = return $ ObjectInt $ fromIntegral k
-          | k .&. negFixintMask == negFixint  = return $ ObjectInt $ fromIntegral (fromIntegral k :: Int8)
-          | k == uint8                        = ObjectInt <$> fromIntegral <$> getWord8
-          | k == uint16                       = ObjectInt <$> fromIntegral <$> getWord16be
-          | k == uint32                       = ObjectInt <$> fromIntegral <$> getWord32be
-          | k == uint64                       = ObjectInt <$> fromIntegral <$> getWord64be
-          | k == int8                         = ObjectInt <$> fromIntegral <$> (get :: Get Int8)
-          | k == int16                        = ObjectInt <$> fromIntegral <$> (get :: Get Int16)
-          | k == int32                        = ObjectInt <$> fromIntegral <$> (get :: Get Int32)
-          | k == int64                        = ObjectInt <$> fromIntegral <$> (get :: Get Int64)
 
           | k .&. fixstrMask    == fixstr     = let n = fromIntegral $ k .&. complement fixstrMask
                                                 in  ObjectString <$> decodeUtf8 <$> getByteString n
@@ -181,6 +182,17 @@ instance Serialize Object where
                                                           <*> getByteString 8
           | k == fixext16                     = ObjectExt <$> (fromIntegral <$> getWord8)
                                                           <*> getByteString 16
+
+          | k == int8                           = ObjectFixInt . FixInt8 <$> (get :: Get Int8)
+          | k == int16                          = ObjectFixInt . FixInt16 <$> (get :: Get Int16)
+          | k == int32                          = ObjectFixInt . FixInt32 <$> (get :: Get Int32)
+          | k == int64                          = ObjectFixInt . FixInt64 <$> (get :: Get Int64)
+          | k .&. negFixintMask == negFixintMask = return . ObjectFixInt . NegFixInt $ fromIntegral k
+          | k == uint8                            = ObjectFixInt . PosFixInt8  <$> getWord8
+          | k == uint16                           = ObjectFixInt . PosFixInt16 <$> getWord16be
+          | k == uint32                           = ObjectFixInt . PosFixInt32 <$> getWord32be
+          | k == uint64                           = ObjectFixInt . PosFixInt64 <$> getWord64be
+          | k .&. posFixintMask == posFixint     = return . ObjectFixInt $ PosFixInt k
 
           | otherwise                         = fail $ "mark byte not supported: " ++ show k
 
