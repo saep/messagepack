@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists   #-}
 module MessagePackClassSpec
     where
 
@@ -84,7 +85,7 @@ spec = do
         `shouldBe` ObjectArray [ObjectInt 1, ObjectInt 2, ObjectInt 4]
 
   describe "map" $ do
-    let objectMap = ObjectMap (Map.fromList
+    let objectMap = ObjectMap (Vector.fromList
                                 [ (ObjectUInt 1, ObjectString "1")
                                 , (ObjectUInt 3, ObjectString "3")
                                 , (ObjectUInt 7, ObjectString "7")

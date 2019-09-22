@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric     #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists   #-}
 {-|
 Module      : Data.MessagePack
 Description : Object data type with Serialize instances for it
@@ -23,11 +24,11 @@ module Data.MessagePack
 
 import           Control.Applicative
 import           Control.DeepSeq       (NFData)
-import           Control.Monad
 import           Data.Bits
 import qualified Data.ByteString       as BS
 import           Data.Int
-import qualified Data.Map              as Map
+-- Lazy maps make no sense in this context.
+import qualified Data.Map.Strict       as Map
 import           Data.MessagePack.Spec
 import           Data.Serialize
 import           Data.Text             (Text)
@@ -56,8 +57,11 @@ data Object = ObjectNil
             | ObjectDouble Double
             | ObjectString BS.ByteString
             | ObjectBinary BS.ByteString
-            | ObjectArray  [Object]
-            | ObjectMap    (Map.Map Object Object )
+            | ObjectArray  !(Vector.Vector Object)
+            -- | You probably never want to use a real map here anyway and just
+            -- convert to the target Haskel value. This should be faster in most
+            -- cases then.
+            | ObjectMap    !(Vector.Vector (Object, Object))
             | ObjectExt    !Int8 BS.ByteString
     deriving (Eq, Ord, Show, Generic)
 
@@ -137,9 +141,9 @@ instance Serialize Object where
           | otherwise      = putWord8 array32 >> putWord32be (fromIntegral size)
 
     put (ObjectMap m)      =
-        buildMap >> mapM_ put (Map.toList m)
+        buildMap >> Vector.mapM_ put m
       where
-        size = Map.size m
+        size = Vector.length m
         buildMap
             | size <= 15     = putWord8 $ fixmap .|. fromIntegral size
             | size < 0x10000 = putWord8 map16 >> putWord16be (fromIntegral size)
@@ -197,18 +201,18 @@ instance Serialize Object where
                                                    ObjectString <$> getByteString n
 
           | k .&. fixarrayMask  == fixarray   = let n = fromIntegral $ k .&. complement fixarrayMask
-                                                in  ObjectArray <$> replicateM n get
+                                                in  ObjectArray <$> Vector.replicateM n get
           | k == array16                      = do n <- fromIntegral <$> getWord16be
-                                                   ObjectArray <$> replicateM n get
+                                                   ObjectArray <$> Vector.replicateM n get
           | k == array32                      = do n <- fromIntegral <$> getWord32be
-                                                   ObjectArray <$> replicateM n get
+                                                   ObjectArray <$> Vector.replicateM n get
 
           | k .&. fixmapMask    == fixmap     = let n = fromIntegral $ k .&. complement fixmapMask
-                                                in  ObjectMap <$> Map.fromList <$> replicateM n get
+                                                in  ObjectMap <$> Vector.replicateM n get
           | k == map16                        = do n <- fromIntegral <$> getWord16be
-                                                   ObjectMap <$> Map.fromList <$> replicateM n get
+                                                   ObjectMap <$> Vector.replicateM n get
           | k == map32                        = do n <- fromIntegral <$> getWord32be
-                                                   ObjectMap <$> Map.fromList <$> replicateM n get
+                                                   ObjectMap <$> Vector.replicateM n get
           | k == ext8                         = do n <- fromIntegral <$> getWord8
                                                    ObjectExt <$> (fromIntegral <$> getWord8)
                                                              <*> getByteString n
@@ -241,7 +245,7 @@ instance MessagePack () where
     toObject _           = ObjectNil
 
     fromObject ObjectNil = pure ()
-    fromObject o         = Nothing
+    fromObject _         = Nothing
 
 instance MessagePack Bool where
     toObject = ObjectBool
@@ -263,7 +267,7 @@ instance MessagePack Double where
     fromObject (ObjectFloat o)  = pure $ realToFrac o
     fromObject (ObjectInt o)    = pure $ fromIntegral o
     fromObject (ObjectUInt o)   = pure $ fromIntegral o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Integer where
     toObject                    = ObjectInt . fromIntegral
@@ -272,7 +276,7 @@ instance MessagePack Integer where
     fromObject (ObjectUInt o)   = pure $ toInteger o
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Int64 where
     toObject                    = ObjectInt . fromIntegral
@@ -283,7 +287,7 @@ instance MessagePack Int64 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Int where
     toObject                    = ObjectInt . fromIntegral
@@ -294,7 +298,7 @@ instance MessagePack Int where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Int32 where
     toObject                    = ObjectInt . fromIntegral
@@ -305,7 +309,7 @@ instance MessagePack Int32 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Int16 where
     toObject                    = ObjectInt . fromIntegral
@@ -316,7 +320,7 @@ instance MessagePack Int16 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Int8 where
     toObject                    = ObjectInt . fromIntegral
@@ -327,7 +331,7 @@ instance MessagePack Int8 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Word64 where
     toObject                    = ObjectUInt
@@ -336,7 +340,7 @@ instance MessagePack Word64 where
     fromObject (ObjectUInt o)   = pure o
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Word where
     toObject                    = ObjectUInt . fromIntegral
@@ -345,7 +349,7 @@ instance MessagePack Word where
     fromObject (ObjectUInt o)   = pure $ fromIntegral o
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 
 instance MessagePack Word32 where
@@ -359,7 +363,7 @@ instance MessagePack Word32 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Word16 where
     toObject                    = ObjectUInt . fromIntegral
@@ -372,7 +376,7 @@ instance MessagePack Word16 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack Word8 where
     toObject                    = ObjectUInt . fromIntegral
@@ -385,15 +389,15 @@ instance MessagePack Word8 where
                                      else Nothing
     fromObject (ObjectDouble o) = pure $ round o
     fromObject (ObjectFloat o)  = pure $ round o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance (MessagePack o1, MessagePack o2) => MessagePack (o1, o2) where
-    toObject (o1, o2) = ObjectArray $ [toObject o1, toObject o2]
+    toObject (o1, o2) = ObjectArray $ Vector.fromList [toObject o1, toObject o2]
 
     fromObject (ObjectArray [o1, o2]) = (,)
         <$> fromObject o1
         <*> fromObject o2
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3) => MessagePack (o1, o2, o3) where
     toObject (o1, o2, o3) = ObjectArray $ [toObject o1, toObject o2, toObject o3]
@@ -402,19 +406,19 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3) => MessagePack (o1, o2
         <$> fromObject o1
         <*> fromObject o2
         <*> fromObject o3
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 instance (Ord key, MessagePack key, MessagePack val)
         => MessagePack (Map.Map key val) where
-    toObject = ObjectMap
-        . Map.fromList . map (\(k, v) -> (toObject k, toObject v)) . Map.toList
+    toObject = ObjectMap . Vector.fromList
+        . map (\(k, v) -> (toObject k, toObject v)) . Map.toList
 
     fromObject (ObjectMap om) = fmap Map.fromList
             . sequence
             . map (\(k, v) -> liftA2 (,) (fromObject k) (fromObject v))
-            $ Map.toList om
+            $ Vector.toList om
 
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 
 instance MessagePack Text where
@@ -422,7 +426,7 @@ instance MessagePack Text where
 
     fromObject (ObjectBinary o) = pure $ decodeUtf8 o
     fromObject (ObjectString o) = pure $ decodeUtf8 o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 
 instance MessagePack BS.ByteString where
@@ -430,7 +434,7 @@ instance MessagePack BS.ByteString where
 
     fromObject (ObjectBinary o) = pure o
     fromObject (ObjectString o) = pure o
-    fromObject o                = Nothing
+    fromObject _                = Nothing
 
 instance MessagePack o => MessagePack (Maybe o) where
     toObject = maybe ObjectNil toObject
@@ -440,10 +444,10 @@ instance MessagePack o => MessagePack (Maybe o) where
 
 
 instance MessagePack o => MessagePack (Vector.Vector o) where
-    toObject = ObjectArray . Vector.toList . Vector.map toObject
+    toObject = ObjectArray . Vector.map toObject
 
-    fromObject (ObjectArray os) = Vector.fromList <$> mapM fromObject os
-    fromObject o                = Nothing
+    fromObject (ObjectArray os) = Vector.mapM fromObject os
+    fromObject _                = Nothing
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4) => MessagePack (o1, o2, o3, o4) where
     toObject (o1, o2, o3, o4) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4]
@@ -453,7 +457,7 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4) => Mes
         <*> fromObject o2
         <*> fromObject o3
         <*> fromObject o4
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5) => MessagePack (o1, o2, o3, o4, o5) where
@@ -465,7 +469,7 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, Messag
         <*> fromObject o3
         <*> fromObject o4
         <*> fromObject o5
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6) => MessagePack (o1, o2, o3, o4, o5, o6) where
@@ -478,7 +482,7 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, Messag
         <*> fromObject o4
         <*> fromObject o5
         <*> fromObject o6
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6, MessagePack o7) => MessagePack (o1, o2, o3, o4, o5, o6, o7) where
@@ -492,7 +496,7 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, Messag
         <*> fromObject o5
         <*> fromObject o6
         <*> fromObject o7
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6, MessagePack o7, MessagePack o8) => MessagePack (o1, o2, o3, o4, o5, o6, o7, o8) where
@@ -507,7 +511,7 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, Messag
         <*> fromObject o6
         <*> fromObject o7
         <*> fromObject o8
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
 
 instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6, MessagePack o7, MessagePack o8, MessagePack o9) => MessagePack (o1, o2, o3, o4, o5, o6, o7, o8, o9) where
@@ -523,5 +527,5 @@ instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, Messag
         <*> fromObject o7
         <*> fromObject o8
         <*> fromObject o9
-    fromObject o = Nothing
+    fromObject _ = Nothing
 
