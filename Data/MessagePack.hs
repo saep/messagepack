@@ -1,4 +1,5 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveGeneric     #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-|
 Module      : Data.MessagePack
 Description : Object data type with Serialize instances for it
@@ -14,19 +15,36 @@ pack types.
 The @Serialize@ instances define how Object values may be serialized and
 deserialized to message pack binary format, following the specification.
 -}
-module Data.MessagePack where
+module Data.MessagePack
+  ( Object(..)
+  , MessagePack(..)
+  , (+:)
+  ) where
 
-import Control.Applicative
-import Control.DeepSeq (NFData)
-import Control.Monad
-import GHC.Generics (Generic)
-import Data.Bits
-import Data.Int
-import Data.MessagePack.Spec
-import Data.Serialize
-import Data.Word
-import qualified Data.ByteString  as BS
-import qualified Data.Map as M
+import           Control.Applicative
+import           Control.DeepSeq       (NFData)
+import           Control.Monad
+import           Data.Bits
+import qualified Data.ByteString       as BS
+import           Data.Int
+import qualified Data.Map              as Map
+import           Data.MessagePack.Spec
+import           Data.Serialize
+import           Data.Text             (Text)
+import           Data.Text.Encoding    (decodeUtf8, encodeUtf8)
+import qualified Data.Vector           as Vector
+import           Data.Word
+import           GHC.Generics          (Generic)
+
+infixr 5 +:
+
+-- | Convenient operator to create a list of 'Object's from normal values.
+-- @
+-- values +: of :+ different :+ types :+ can +: be +: combined +: this +: way +: []
+-- @
+(+:) :: (MessagePack o) => o -> [Object] -> [Object]
+o +: os = toObject o : os
+
 
 data Object = ObjectNil
             -- | Unsigned integers from the MsgPack protocol: uint 8, uint 16, uint 32, uint 64
@@ -39,11 +57,33 @@ data Object = ObjectNil
             | ObjectString BS.ByteString
             | ObjectBinary BS.ByteString
             | ObjectArray  [Object]
-            | ObjectMap    (M.Map Object Object )
+            | ObjectMap    (Map.Map Object Object )
             | ObjectExt    !Int8 BS.ByteString
     deriving (Eq, Ord, Show, Generic)
 
 instance NFData Object
+
+
+-- | This class can be used to conveniently convert between messagepack objects
+-- and Haskell objects. The operator '(+:)' is a convenient operator that can be
+-- used to create 'Object' lists as these are often used for RPC stuff or
+-- implementations of instances of 'MessagePack'.
+class MessagePack o where
+    {-# MINIMAL toObject, fromObject #-}
+
+    -- | Convert a Haskell value to a messagepack 'Object'. As you shouldn't
+    -- have objects that can only sometimes be converted to an 'Object', this
+    -- direction of conversion doesn't throw an error and you probably don't
+    -- want to convert objects for which it isn't the case.
+    toObject :: o -> Object
+
+    -- | The conversion is sometimes lenient if it comes to convert a value.
+    --   An example for this is the 'Bool' instance because there are languages
+    --   that do not have a proper boolean type (e.g. C, vimL). This behavior is
+    --   convenient and sometimes wnated in practice, if you don't want this,
+    --   simply use the 'Object' types directly.
+    fromObject :: Object -> Maybe o
+
 
 instance Serialize Object where
     put (ObjectUInt i)
@@ -97,9 +137,9 @@ instance Serialize Object where
           | otherwise      = putWord8 array32 >> putWord32be (fromIntegral size)
 
     put (ObjectMap m)      =
-        buildMap >> mapM_ put (M.toList m)
+        buildMap >> mapM_ put (Map.toList m)
       where
-        size = M.size m
+        size = Map.size m
         buildMap
             | size <= 15     = putWord8 $ fixmap .|. fromIntegral size
             | size < 0x10000 = putWord8 map16 >> putWord16be (fromIntegral size)
@@ -164,11 +204,11 @@ instance Serialize Object where
                                                    ObjectArray <$> replicateM n get
 
           | k .&. fixmapMask    == fixmap     = let n = fromIntegral $ k .&. complement fixmapMask
-                                                in  ObjectMap <$> M.fromList <$> replicateM n get
+                                                in  ObjectMap <$> Map.fromList <$> replicateM n get
           | k == map16                        = do n <- fromIntegral <$> getWord16be
-                                                   ObjectMap <$> M.fromList <$> replicateM n get
+                                                   ObjectMap <$> Map.fromList <$> replicateM n get
           | k == map32                        = do n <- fromIntegral <$> getWord32be
-                                                   ObjectMap <$> M.fromList <$> replicateM n get
+                                                   ObjectMap <$> Map.fromList <$> replicateM n get
           | k == ext8                         = do n <- fromIntegral <$> getWord8
                                                    ObjectExt <$> (fromIntegral <$> getWord8)
                                                              <*> getByteString n
@@ -190,4 +230,298 @@ instance Serialize Object where
                                                           <*> getByteString 16
 
           | otherwise                         = fail $ "mark byte not supported: " ++ show k
+
+
+instance MessagePack Object where
+    toObject o = o
+
+    fromObject o = Just o
+
+instance MessagePack () where
+    toObject _           = ObjectNil
+
+    fromObject ObjectNil = pure ()
+    fromObject o         = Nothing
+
+instance MessagePack Bool where
+    toObject = ObjectBool
+
+    fromObject (ObjectBool o)     = pure o
+    fromObject (ObjectInt  0)     = pure False
+    fromObject (ObjectUInt 0)     = pure False
+    fromObject ObjectNil          = pure False
+    fromObject (ObjectBinary "0") = pure False
+    fromObject (ObjectBinary "")  = pure False
+    fromObject (ObjectString "0") = pure False
+    fromObject (ObjectString "")  = pure False
+    fromObject _                  = pure True
+
+instance MessagePack Double where
+    toObject                    = ObjectDouble
+
+    fromObject (ObjectDouble o) = pure o
+    fromObject (ObjectFloat o)  = pure $ realToFrac o
+    fromObject (ObjectInt o)    = pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = pure $ fromIntegral o
+    fromObject o                = Nothing
+
+instance MessagePack Integer where
+    toObject                    = ObjectInt . fromIntegral
+
+    fromObject (ObjectInt o)    = pure $ toInteger o
+    fromObject (ObjectUInt o)   = pure $ toInteger o
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Int64 where
+    toObject                    = ObjectInt . fromIntegral
+
+    fromObject (ObjectInt o)    = pure $ o
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Int64)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Int where
+    toObject                    = ObjectInt . fromIntegral
+
+    fromObject (ObjectInt o)    = pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Int)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Int32 where
+    toObject                    = ObjectInt . fromIntegral
+
+    fromObject (ObjectInt o)    = pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Int32)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Int16 where
+    toObject                    = ObjectInt . fromIntegral
+
+    fromObject (ObjectInt o)    = pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Int16)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Int8 where
+    toObject                    = ObjectInt . fromIntegral
+
+    fromObject (ObjectInt o)    = pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Int8)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Word64 where
+    toObject                    = ObjectUInt
+
+    fromObject (ObjectInt o)    = if o < 0 then Nothing else pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = pure o
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Word where
+    toObject                    = ObjectUInt . fromIntegral
+
+    fromObject (ObjectInt o)    = if o < 0 then Nothing else pure $ fromIntegral o
+    fromObject (ObjectUInt o)   = pure $ fromIntegral o
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+
+instance MessagePack Word32 where
+    toObject                    = ObjectUInt . fromIntegral
+
+    fromObject (ObjectInt o)    = if o >= 0 && o <= fromIntegral (maxBound :: Word32)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Word32)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Word16 where
+    toObject                    = ObjectUInt . fromIntegral
+
+    fromObject (ObjectInt o)    = if o >= 0 && o <= fromIntegral (maxBound :: Word16)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Word16)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance MessagePack Word8 where
+    toObject                    = ObjectUInt . fromIntegral
+
+    fromObject (ObjectInt o)    = if o >= 0 && o <= fromIntegral (maxBound :: Word8)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectUInt o)   = if o <= fromIntegral (maxBound :: Word8)
+                                     then pure $ fromIntegral o
+                                     else Nothing
+    fromObject (ObjectDouble o) = pure $ round o
+    fromObject (ObjectFloat o)  = pure $ round o
+    fromObject o                = Nothing
+
+instance (MessagePack o1, MessagePack o2) => MessagePack (o1, o2) where
+    toObject (o1, o2) = ObjectArray $ [toObject o1, toObject o2]
+
+    fromObject (ObjectArray [o1, o2]) = (,)
+        <$> fromObject o1
+        <*> fromObject o2
+    fromObject o = Nothing
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3) => MessagePack (o1, o2, o3) where
+    toObject (o1, o2, o3) = ObjectArray $ [toObject o1, toObject o2, toObject o3]
+
+    fromObject (ObjectArray [o1, o2, o3]) = (,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+    fromObject o = Nothing
+
+instance (Ord key, MessagePack key, MessagePack val)
+        => MessagePack (Map.Map key val) where
+    toObject = ObjectMap
+        . Map.fromList . map (\(k, v) -> (toObject k, toObject v)) . Map.toList
+
+    fromObject (ObjectMap om) = fmap Map.fromList
+            . sequence
+            . map (\(k, v) -> liftA2 (,) (fromObject k) (fromObject v))
+            $ Map.toList om
+
+    fromObject o = Nothing
+
+
+instance MessagePack Text where
+    toObject                    = ObjectString . encodeUtf8
+
+    fromObject (ObjectBinary o) = pure $ decodeUtf8 o
+    fromObject (ObjectString o) = pure $ decodeUtf8 o
+    fromObject o                = Nothing
+
+
+instance MessagePack BS.ByteString where
+    toObject                    = ObjectBinary
+
+    fromObject (ObjectBinary o) = pure o
+    fromObject (ObjectString o) = pure o
+    fromObject o                = Nothing
+
+instance MessagePack o => MessagePack (Maybe o) where
+    toObject = maybe ObjectNil toObject
+
+    fromObject ObjectNil = return Nothing
+    fromObject o         = fromObject o
+
+
+instance MessagePack o => MessagePack (Vector.Vector o) where
+    toObject = ObjectArray . Vector.toList . Vector.map toObject
+
+    fromObject (ObjectArray os) = Vector.fromList <$> mapM fromObject os
+    fromObject o                = Nothing
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4) => MessagePack (o1, o2, o3, o4) where
+    toObject (o1, o2, o3, o4) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4]
+
+    fromObject (ObjectArray [o1, o2, o3, o4]) = (,,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+        <*> fromObject o4
+    fromObject o = Nothing
+
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5) => MessagePack (o1, o2, o3, o4, o5) where
+    toObject (o1, o2, o3, o4, o5) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4, toObject o5]
+
+    fromObject (ObjectArray [o1, o2, o3, o4, o5]) = (,,,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+        <*> fromObject o4
+        <*> fromObject o5
+    fromObject o = Nothing
+
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6) => MessagePack (o1, o2, o3, o4, o5, o6) where
+    toObject (o1, o2, o3, o4, o5, o6) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4, toObject o5, toObject o6]
+
+    fromObject (ObjectArray [o1, o2, o3, o4, o5, o6]) = (,,,,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+        <*> fromObject o4
+        <*> fromObject o5
+        <*> fromObject o6
+    fromObject o = Nothing
+
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6, MessagePack o7) => MessagePack (o1, o2, o3, o4, o5, o6, o7) where
+    toObject (o1, o2, o3, o4, o5, o6, o7) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4, toObject o5, toObject o6, toObject o7]
+
+    fromObject (ObjectArray [o1, o2, o3, o4, o5, o6, o7]) = (,,,,,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+        <*> fromObject o4
+        <*> fromObject o5
+        <*> fromObject o6
+        <*> fromObject o7
+    fromObject o = Nothing
+
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6, MessagePack o7, MessagePack o8) => MessagePack (o1, o2, o3, o4, o5, o6, o7, o8) where
+    toObject (o1, o2, o3, o4, o5, o6, o7, o8) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4, toObject o5, toObject o6, toObject o7, toObject o8]
+
+    fromObject (ObjectArray [o1, o2, o3, o4, o5, o6, o7, o8]) = (,,,,,,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+        <*> fromObject o4
+        <*> fromObject o5
+        <*> fromObject o6
+        <*> fromObject o7
+        <*> fromObject o8
+    fromObject o = Nothing
+
+
+instance (MessagePack o1, MessagePack o2, MessagePack o3, MessagePack o4, MessagePack o5, MessagePack o6, MessagePack o7, MessagePack o8, MessagePack o9) => MessagePack (o1, o2, o3, o4, o5, o6, o7, o8, o9) where
+    toObject (o1, o2, o3, o4, o5, o6, o7, o8, o9) = ObjectArray $ [toObject o1, toObject o2, toObject o3, toObject o4, toObject o5, toObject o6, toObject o7, toObject o8, toObject o9]
+
+    fromObject (ObjectArray [o1, o2, o3, o4, o5, o6, o7, o8, o9]) = (,,,,,,,,)
+        <$> fromObject o1
+        <*> fromObject o2
+        <*> fromObject o3
+        <*> fromObject o4
+        <*> fromObject o5
+        <*> fromObject o6
+        <*> fromObject o7
+        <*> fromObject o8
+        <*> fromObject o9
+    fromObject o = Nothing
 

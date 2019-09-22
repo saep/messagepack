@@ -1,17 +1,14 @@
-{-# LANGUAGE TemplateHaskell #-}
-module Main where
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+module SerializationSpec where
 
 import Control.Applicative
 import Data.MessagePack
 import Data.Serialize
-import Test.Framework.Providers.QuickCheck2
-import Test.Framework.TH
+import Test.Hspec
 import Test.QuickCheck
 import qualified Data.ByteString as BS
 import qualified Data.Map as M
 
-main :: IO ()
-main = $(defaultMainGenerator)
 
 instance Arbitrary Object where
     arbitrary = sized $ \n -> oneof [ return ObjectNil
@@ -39,6 +36,10 @@ instance Arbitrary BS.ByteString where
 
     shrink = map BS.pack . shrink . BS.unpack
 
-prop_encodeDecodeIsIdentity :: Object -> Bool
-prop_encodeDecodeIsIdentity o = either error (== o) $ decode $ encode o
+
+spec :: Spec
+spec = do
+  describe "Object serialization and deserialization" $ do
+    it "encode followed by decode is the identity" $ do
+      \o -> decode (encode o) `shouldBe` Right o
 
