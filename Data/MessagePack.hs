@@ -439,8 +439,11 @@ instance MessagePack BS.ByteString where
 instance MessagePack o => MessagePack (Maybe o) where
     toObject = maybe ObjectNil toObject
 
-    fromObject ObjectNil = return Nothing
-    fromObject o         = fromObject o
+    fromObject ObjectNil         = pure Nothing
+    fromObject (ObjectArray [])  = pure Nothing
+    fromObject (ObjectArray [o]) = Just <$> fromObject o
+    fromObject (ObjectArray _)   = Nothing
+    fromObject o                 = Just <$> fromObject o
 
 
 instance MessagePack o => MessagePack (Vector.Vector o) where

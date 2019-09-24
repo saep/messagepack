@@ -97,3 +97,12 @@ spec = do
     it "fromObject" $
       fromObject objectMap `shouldBe` Just normalMap
 
+  describe "maybe" $
+    it "doesn't accidently use the failure maybe" $ do
+      fromObject ObjectNil `shouldBe` Just (Nothing :: Maybe Int)
+      fromObject (ObjectInt 7) `shouldBe` Just (Just (7 :: Word8))
+      fromObject (ObjectArray []) `shouldBe` Just (Nothing :: Maybe Bool)
+      fromObject (ObjectArray [ObjectBool True]) `shouldBe` Just (Just True)
+      fromObject (ObjectArray [ObjectBool True, ObjectBool True])
+        `shouldBe` (Nothing :: Maybe (Maybe Bool))
+
